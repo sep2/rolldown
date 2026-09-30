@@ -28,6 +28,7 @@ pub mod lazy_barrel;
 pub mod member_expr_ref;
 pub mod member_expr_ref_resolution;
 pub mod module_def_format;
+pub mod module_factories_output;
 pub mod module_id;
 pub mod module_info;
 pub mod module_namespace_included_reason;

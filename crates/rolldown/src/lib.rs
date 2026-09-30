@@ -31,6 +31,8 @@ pub use crate::{
 };
 
 pub use rolldown_common::bundler_options::*;
+#[cfg(feature = "experimental")]
+pub use rolldown_common::{ModuleFactoriesOutput, ModuleFactoryInfo};
 
 pub use rolldown_resolver::ResolveOptions;
 

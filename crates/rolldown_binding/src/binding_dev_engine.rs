@@ -291,6 +291,34 @@ impl BindingDevEngine {
     })
   }
 
+  /// Render source factories without invoking the build or delivery pipelines.
+  #[napi]
+  pub fn render_module_factories<'env>(
+    &self,
+    env: &'env Env,
+    module_ids: Vec<String>,
+  ) -> napi::Result<PromiseRaw<'env, BindingModuleFactoriesOutput>> {
+    let inner = Arc::clone(&self.inner);
+    spawn_boxed_future(env, async move {
+      inner
+        .render_module_factories(&module_ids)
+        .await
+        .map(|output| BindingModuleFactoriesOutput {
+          code: output.code,
+          sourcemap: output.sourcemap.map(|map| map.to_json_string()),
+          modules: output
+            .modules
+            .into_iter()
+            .map(|module| BindingModuleFactoryInfo {
+              id: module.id.to_string(),
+              stable_id: module.stable_id.to_string(),
+            })
+            .collect(),
+        })
+        .map_err(|e| napi::Error::from_reason(format!("Failed to render module factories: {e:#?}")))
+    })
+  }
+
   /// Compile a lazy entry module and return HMR-style patch code.
   ///
   /// This is called when a dynamically imported module is first requested at runtime.
@@ -329,6 +357,19 @@ impl BindingDevEngine {
   pub fn get_module_ids<'env>(&self, env: &'env Env) -> napi::Result<Vec<napi::JsString<'env>>> {
     self.inner.get_module_ids().iter().map(|id| env.create_string(id)).try_collect()
   }
+}
+
+#[napi(object)]
+pub struct BindingModuleFactoryInfo {
+  pub id: String,
+  pub stable_id: String,
+}
+
+#[napi(object)]
+pub struct BindingModuleFactoriesOutput {
+  pub code: String,
+  pub sourcemap: Option<String>,
+  pub modules: Vec<BindingModuleFactoryInfo>,
 }
 
 /// The client-facing slice of a lazy-compile result. The carried modules and

@@ -401,6 +401,9 @@ the changed module.
   step order inside `compute_hmr_update_for_file_changes`
 - [lazy-compilation/design.md](../lazy-compilation/design.md) — the
   `rolldown:exports` proxy contract; lazy chunk sizing reads the ship map
+- [Module factory rendering](../module-factory-rendering/design.md) — the
+  source renderer shared with the pure `renderModuleFactories` API; no change to
+  the HMR selection or delivery protocol
 - Runtime API (`runtime-extra-dev-common.js`): lifecycle methods
   `registerGraph`, `registerFactory`, `registerModule`, `initModule`,
   `removeModuleCache`, `loadExports`; read-only queries

@@ -1,6 +1,10 @@
 export { dev } from './api/dev';
 export { DevEngine } from './api/dev/dev-engine';
 export type { DevOptions, DevWatchOptions } from './api/dev/dev-options';
+export type {
+  ModuleFactoriesOutput,
+  ModuleFactoryInfo,
+} from './api/dev/module-factories-output';
 export { freeExternalMemory, scan } from './api/experimental';
 export {
   type BindingClientHmrUpdate,

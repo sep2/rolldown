@@ -3,6 +3,8 @@ mod impl_bundler_build;
 mod impl_bundler_getter;
 mod impl_bundler_hmr;
 mod impl_bundler_incremental_build;
+#[cfg(feature = "experimental")]
+mod impl_bundler_module_factories;
 #[cfg(feature = "testing")]
 mod impl_bundler_testing;
 

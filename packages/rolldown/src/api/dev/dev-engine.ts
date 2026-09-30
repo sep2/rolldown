@@ -18,6 +18,7 @@ import { normalizeBindingResult, unwrapBindingResult } from '../../utils/error';
 import { normalizedStringOrRegex } from '../../utils/normalize-string-or-regex';
 import { transformToRollupOutput } from '../../utils/transform-to-rollup-output';
 import type { DevOptions } from './dev-options';
+import type { ModuleFactoriesOutput } from './module-factories-output';
 
 /**
  * The part of the binding engine the module graph reads from.
@@ -206,6 +207,23 @@ export class DevEngine {
         shutdownAsyncRuntime();
       }
     }
+  }
+
+  /**
+   * Render the requested source modules as development-runtime factories.
+   *
+   * Reads the retained scan snapshot without scanning, running hooks, emitting
+   * assets, or changing client/delivery state. Requires experimental.devMode and
+   * a completed build. Dependencies are referenced, not automatically rendered.
+   * This does not wait for queued rebuilds: coordinate freshness before calling.
+   * Do not await this from a plugin hook that already holds the bundler lock.
+   *
+   * Unknown/external/internal-runtime IDs and source forms requiring unsupported
+   * lowering (non-JS loaders, top-level await, generated asset URLs) are rejected.
+   * The result is ESM registration code, not a replacement normal output chunk.
+   */
+  async renderModuleFactories(moduleIds: string[]): Promise<ModuleFactoriesOutput> {
+    return this.#inner.renderModuleFactories(moduleIds);
   }
 
   /**

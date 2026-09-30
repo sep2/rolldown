@@ -9,13 +9,10 @@ use std::{
 
 use arcstr::ArcStr;
 use itertools::Itertools;
-use oxc::ast::builder::AstBuilder;
-use oxc_traverse::traverse_mut;
 use rolldown_common::{
   ClientHmrInput, ClientHmrUpdate, HmrLazyChunkOutput, HmrPatch, HmrStampTable, HmrUpdate,
   ImportKind, Module, ModuleIdx, ModuleTable, ScanMode, WatcherChangeKind,
 };
-use rolldown_ecmascript::{EcmaAst, EcmaCompiler, PrintCommentsOptions, PrintOptions};
 use rolldown_error::BuildResult;
 use rolldown_fs::FileSystem;
 use rolldown_plugin::SharedPluginDriver;
@@ -32,14 +29,11 @@ use sugar_path::SugarPath;
 
 use crate::{
   SharedOptions, SharedResolver,
-  hmr::hmr_ast_finalizer::HmrAstFinalizer,
+  hmr::module_factory_renderer::{ModuleRenderInput, render_module_factory},
   module_loader::ModuleLoader,
   type_alias::IndexEcmaAst,
   types::scan_stage_cache::ScanStageCache,
-  utils::{
-    process_code_and_sourcemap::process_code_and_sourcemap,
-    render_ecma_module::collapse_module_sourcemap,
-  },
+  utils::process_code_and_sourcemap::process_code_and_sourcemap,
 };
 
 pub struct HmrStageInput<'a, Fs: FileSystem + Clone + 'static> {
@@ -855,104 +849,20 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
     }))
   }
 
-  /// Finalize and print one module into its HMR payload form (factory-registration
-  /// snippet, without the `//#region` framing).
-  ///
-  /// `unique_index` seeds the payload-position-dependent binding suffixes, so two
-  /// renders of the same module compare equal only when they pin it to the same
-  /// value. `with_sourcemap: false` skips sourcemap generation even when the
-  /// options ask for one.
   fn render_module_code(
     &self,
     render_input: ModuleRenderInput,
     unique_index: usize,
     with_sourcemap: bool,
   ) -> (String, Option<SourceMap>) {
-    let ModuleRenderInput { idx: module_idx, ecma_ast: mut ast } = render_input;
-
-    let Module::Normal(module) = &self.module_table().modules[module_idx] else {
-      unreachable!("HMR only supports normal module");
-    };
-
-    let enable_sourcemap =
-      with_sourcemap && self.options.sourcemap.is_some() && !module.is_virtual();
-    let use_pife_for_module_wrappers =
-      self.options.optimization.is_pife_for_module_wrappers_enabled();
-    let modules = &self.module_table().modules;
-
-    ast.program.with_mut(|fields| {
-      // Re-running semantic re-stamps every NodeId. The NodeId-keyed side-table lookups
-      // below still hit only because the clone is unmutated at this point: identical tree
-      // shape re-derives exactly the scan-time ids (see internal-docs/ast-mutation/implementation.md).
-      let scoping = EcmaAst::make_semantic(fields.program).into_scoping();
-
-      let mut finalizer = HmrAstFinalizer {
-        modules,
-        ast_builder: AstBuilder::new(fields.allocator),
-        import_bindings: FxHashMap::default(),
-        module,
-        exports: oxc::allocator::Vec::new_in(&fields.allocator),
-        use_pife_for_module_wrappers,
-        dependencies: FxIndexSet::default(),
-        generated_load_exports_stmts: FxHashMap::default(),
-        generated_static_import_infos: FxHashMap::default(),
-        re_export_all_dependencies: FxIndexSet::default(),
-        generated_static_import_stmts_from_external: FxIndexMap::default(),
-        unique_index,
-        named_exports: FxHashMap::default(),
-      };
-
-      traverse_mut(&mut finalizer, fields.allocator, fields.program, scoping, ());
-    });
-
-    let codegen = EcmaCompiler::print_with(
-      &ast,
-      PrintOptions {
-        sourcemap: enable_sourcemap,
-        filename: module.id.to_string(),
-        comments: PrintCommentsOptions {
-          legal: false, // ignore hmr chunk comments
-          annotation: self.options.comments.annotation,
-          jsdoc: self.options.comments.jsdoc,
-        },
-        initial_indent: 0,
-      },
-    );
-
-    // The codegen map is the last element of the module's sourcemap chain, so on its
-    // own it maps back to what the plugins produced rather than to the original file.
-    // Collapsing the chain is what lets a position in a patch or a lazy chunk resolve
-    // to the source the user wrote, the same way `render_ecma_module` does for a
-    // module rendered into a chunk.
-    //
-    // Warnings are dropped: a module rendered here was rendered by the full build too,
-    // which reports a broken chain for it already.
-    let (code, codegen_map) = match codegen.map {
-      Some(map) => (codegen.code, Some(map.into_owned())),
-      None => (codegen.code, None),
-    };
-
-    // Guarded, because a chain collapses to a map even when the codegen step
-    // contributed none — which would hand back a sourcemap for a render that asked
-    // not to have one.
-    let map = enable_sourcemap
-      .then(|| {
-        collapse_module_sourcemap(
-          &module.sourcemap_chain,
-          codegen_map,
-          module.id.as_str(),
-          &mut Vec::new(),
-        )
-      })
-      .flatten();
-
-    (code, map)
+    render_module_factory(
+      self.module_table(),
+      &self.options,
+      render_input,
+      unique_index,
+      with_sourcemap,
+    )
   }
-}
-
-struct ModuleRenderInput {
-  pub idx: ModuleIdx,
-  pub ecma_ast: EcmaAst,
 }
 
 impl<Fs: FileSystem + Clone + 'static> HmrStage<'_, Fs> {

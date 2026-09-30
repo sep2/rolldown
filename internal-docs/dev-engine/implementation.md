@@ -109,6 +109,15 @@ The HMR-related fields (`dev_context.rs:30-51`):
   (`bundling_task.rs:92`); the next HMR compute reads it as
   `last_build_errored` to turn off unchanged-output suppression.
 
+### Pure source-factory rendering
+
+`DevEngine::render_module_factories` / `renderModuleFactories` reads the retained
+scan snapshot under the bundler lock without scheduling coordinator work or
+changing client/delivery state. It renders only the selected source IDs through
+the same factory renderer as HMR and lazy compilation. It is not a freshness
+barrier or a replacement normal build; see
+[module-factory-rendering](../module-factory-rendering/implementation.md).
+
 ### Browser runtime ownership
 
 The HMR plugin appends `experimental.devMode.implement`. The Rust layer
@@ -1162,7 +1171,7 @@ return the success value or throw a `BundleError`.
 Used by: `ensureLatestBuildOutput` (`binding_dev_engine.rs:216-219`,
 unwrapped in `packages/rolldown/src/api/dev/dev-engine.ts:168`). The
 other napi methods that can fail (`run`, `ensureCurrentBuildFinish`,
-`getBundleState`, `compileEntry`, `close`) convert their error to a plain
+`getBundleState`, `compileEntry`, `renderModuleFactories`, `close`) convert their error to a plain
 `napi::Error` with a reason string instead. The thrown error reaches
 whichever audience called the method:
 

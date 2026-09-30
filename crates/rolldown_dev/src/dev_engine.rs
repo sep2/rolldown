@@ -7,7 +7,7 @@ use anyhow::Context;
 use futures::{FutureExt, future::Shared};
 #[cfg(feature = "testing")]
 use rolldown_common::WatcherChangeKind;
-use rolldown_common::{HmrLazyChunkOutput, HmrStampTable};
+use rolldown_common::{HmrLazyChunkOutput, HmrStampTable, ModuleFactoriesOutput};
 use rolldown_error::{BuildResult, ResultExt};
 use rolldown_fs_watcher::{FsWatcher, FsWatcherConfig};
 use rustc_hash::FxHashMap;
@@ -346,6 +346,17 @@ impl DevEngine {
     for (id, stamp) in pending.modules {
       session.shipped.entry(id).and_modify(|e| *e = (*e).max(stamp)).or_insert(stamp);
     }
+  }
+
+  /// Pure rendering from the retained graph; no build, client, or delivery side effects.
+  /// The bundler lock gives this request one coherent snapshot, not a freshness barrier.
+  /// See internal-docs/module-factory-rendering/implementation.md.
+  pub async fn render_module_factories(
+    &self,
+    module_ids: &[String],
+  ) -> BuildResult<ModuleFactoriesOutput> {
+    self.create_error_if_closed()?;
+    self.bundler.lock().await.render_module_factories(module_ids)
   }
 
   /// Compile a lazy entry module and return compiled code.

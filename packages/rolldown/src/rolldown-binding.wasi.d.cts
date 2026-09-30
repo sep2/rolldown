@@ -1590,6 +1590,8 @@ export declare class BindingDevEngine {
   notifyPayloadDelivered(filename: string): Promise<void>
   removeClient(clientId: string): Promise<void>
   close(): Promise<void>
+  /** Render source factories without invoking the build or delivery pipelines. */
+  renderModuleFactories(moduleIds: Array<string>): Promise<BindingModuleFactoriesOutput>
   /**
    * Compile a lazy entry module and return HMR-style patch code.
    *
@@ -2565,6 +2567,17 @@ export interface BindingMatchGroup {
   entriesAwareMergeThreshold?: number
   tags?: Array<string>
   includeDependenciesRecursively?: boolean
+}
+
+export interface BindingModuleFactoriesOutput {
+  code: string
+  sourcemap?: string
+  modules: Array<BindingModuleFactoryInfo>
+}
+
+export interface BindingModuleFactoryInfo {
+  id: string
+  stableId: string
 }
 
 export interface BindingModules {
