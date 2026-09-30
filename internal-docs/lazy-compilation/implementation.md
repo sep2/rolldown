@@ -323,7 +323,10 @@ After `/lazy`, the real module and its sync deps are ordinary watched graph modu
 **Solution**: Use **stable IDs** (`stable_id`, relative paths from cwd) consistently in the runtime:
 
 - `registerFactory(stableId, factory)` — inside the wrapper, `registerModule(__rolldown_module_id__, { exports })` and `createModuleHotContext(__rolldown_module_id__)` receive the id via the wrapper parameter (the main-bundle path still emits stable-id string literals)
-- `loadExports(stableId)` / `initModule(stableId)`
+- `loadExports(stableId)` / `initModule(stableId)`; ordinary dynamic imports in
+  source factories use `importModule(stableId, commonJsInterop?)`, which prepares
+  missing factories asynchronously before initialization (see
+  [module factory rendering](../module-factory-rendering/implementation.md))
 - `import.meta.hot.accept(stableId, callback)`
 - `registerGraph` rows and `changedIds` in the HMR push
 

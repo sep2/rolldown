@@ -52,6 +52,53 @@ const output = await engine.renderModuleFactories([moduleId]);
 All request validation finishes before source rendering starts. A failed request
 does not change the compiler graph. Successful rendering also leaves it intact.
 
+## Runtime loading and execution
+
+`crates/rolldown_plugin_hmr/src/runtime/runtime-extra-dev-common.js` implements the
+generic source-factory loading contract:
+
+1. `importModule(id, commonJsInterop?)` walks compiler-emitted static graph rows,
+   skipping executed modules and using one request-local visited set for cycles.
+2. For each missing factory, `#loadFactory` calls the optional host
+   `loadModuleFactories(id)` callback. A per-ID promise map deduplicates concurrent
+   loads. The callback must finish registration before resolving.
+3. Verify registration (or that the module became executed), then remove the
+   settled transport promise. Rejection also removes it so a subsequent import
+   can retry. Requests never share graph-walk promises.
+4. After the closure is ready, yield before calling synchronous `initModule`.
+   Existing cache gating still controls evaluation; preloading executes no body.
+5. Return the module exports, applying requested CJS namespace conversion before
+   resolving the promise.
+
+`HmrAstFinalizer::try_rewrite_dynamic_import` emits:
+
+```js
+// ESM target
+__rolldown_runtime__.importModule("src/feature.js")
+// CJS target: 0 for Babel interop, 1 for Node interop
+__rolldown_runtime__.importModule("src/feature.cjs", 1)
+```
+
+External imports and the existing lazy-compilation proxy branch are unchanged.
+The loader callback owns resource lookup, registration, and physical-load
+coalescing when several IDs map to the same payload. It must not recursively await
+an import of the ID whose loading it is fulfilling.
+
+A host installs transport independently of the compiler:
+
+```ts
+runtime.loadModuleFactories = async (stableId) => {
+  const payload = await loadResource(moduleResources.get(stableId));
+  payload.install(runtime); // Registers graph rows and factories, not module bodies.
+};
+const namespace = await runtime.importModule(entryStableId);
+```
+
+`loadResource` and the payload envelope are host-defined, not Rolldown APIs.
+Synchronous native entry points can install their required static closure first
+and continue using `initModule`; this API does not make synchronous consumers
+implicitly asynchronous.
+
 ## Invariants
 
 - Rebuild semantic information before mutating cloned ASTs, so scan-time

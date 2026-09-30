@@ -31,10 +31,41 @@ the code registers internal factories without running their bodies, but external
 ESM imports can evaluate external modules.
 
 Normal bundle generation remains scope-hoisted. This API changes neither chunk
-grouping nor entry exports, execution order, runtime implementation, or existing
-HMR/lazy-compilation policy. A consumer cannot transparently replace a normal
+grouping nor entry exports or normal-bundle execution order. The shared runtime
+adds an opt-in factory loader; HMR selection and delivery policy remain unchanged. A consumer cannot transparently replace a normal
 output chunk with factory code: it must arrange dependencies, runtime
 initialization, and entry/export behavior itself.
+
+## Asynchronous execution is a separate runtime capability
+
+Source factories cannot use a physical chunk import to load their dependencies.
+The shared `DevRuntime` therefore exposes `importModule(stableId, commonJsInterop?)`
+and an optional `loadModuleFactories(stableId)` host callback. Source-factory
+`import()` codegen calls this primitive; normal scope-hoisted output and the
+existing lazy-compilation proxy transport keep their own loading paths.
+
+The runtime prepares the requested module's static factory closure, then enters
+the existing synchronous `initModule` gate. Dynamic graph edges are not traversed.
+Static imports and `require()` stay synchronous inside factories: loading completes
+before any body starts. The callback supplies registration-only code and must
+install its graph rows and factories before settling. It may return synchronously
+or asynchronously and may install several modules from one payload.
+
+Each import owns its cycle-safe graph walk. Only individual in-flight loads are
+shared; caching entire dependency-closure promises would deadlock concurrent
+imports at different roots of a cycle. Failed loads are removed for retry.
+Without a callback, missing factories still reject with `MissingFactoryError`.
+An already-executed module needs no loading or traversal.
+
+The compiler passes CJS interop mode when needed, so namespace conversion happens
+before the import promise resolves, rather than accidentally resolving raw
+thenable CJS exports first. Evaluation is asynchronous even on the resident-factory
+path; initialization errors reject the import promise.
+
+No transport is built into Rolldown: the host maps stable IDs to resources and
+installs their code. The callback does not acknowledge delivery, choose HMR
+boundaries, or evict module caches. A host must still coordinate payload versions
+and must not install stale baseline code over newer HMR registrations.
 
 ## Snapshot, not a freshness guarantee
 
@@ -68,4 +99,6 @@ Selection is expected O(N) in requested IDs. Graph rendering visits the selected
 modules' import records. AST cloning, semantic analysis, printing, and source-map
 composition are proportional to the selected source and map sizes; independent
 module rendering uses the existing parallel worker pool. No unrelated source is
-re-transformed, and no additional persistent cache or per-client state is added.
+re-transformed, and the renderer adds no persistent cache or per-client state.
+Runtime import preparation is O(V + E) in the unexecuted static closure, excluding
+host I/O. Its shared load map retains only currently in-flight requests.

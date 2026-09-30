@@ -99,6 +99,21 @@ export class DevRuntime {
   hooks = null;
 
   /**
+   * Optional host transport, installed at boot. Load registration-only code for a
+   * stable module ID; it must install the factory and its graph row before settling.
+   * Transport, filenames, and delivery/version policy belong to the host.
+   * @type {((moduleId: string) => void | Promise<void>) | null}
+   */
+  loadModuleFactories = null;
+
+  /**
+   * Share only in-flight transport work, never dependency walks or module evaluation.
+   * Settled requests are removed so a failed load can be retried without a reset.
+   * @type {Map<string, Promise<void>>}
+   */
+  #pendingFactoryLoads = new Map();
+
+  /**
    * @param {ModuleGraphDelta} delta
    */
   registerGraph(delta) {
@@ -208,6 +223,72 @@ export class DevRuntime {
     }
     factory(id);
     return this.loadExports(id);
+  }
+
+  /**
+   * Asynchronous source-module import. Load missing factories in the static closure
+   * before entering the existing synchronous evaluation gate. Dynamic edges stay lazy.
+   * See internal-docs/module-factory-rendering/design.md.
+   * @param {string} id
+   * @param {0 | 1} [commonJsInterop] Unset for ESM; 0 for Babel, 1 for Node CJS interop.
+   * @returns {Promise<any>}
+   */
+  async importModule(id, commonJsInterop) {
+    // Each import owns its walk. Sharing a closure promise across cyclic roots would
+    // make their walks await each other; only individual physical loads are shared.
+    const visited = new Set();
+    // The local worklist grows as newly loaded graph rows reveal static dependencies.
+    const pending = [id];
+    for (const current of pending) {
+      if (visited.has(current) || this.isExecuted(current)) {
+        continue;
+      }
+      visited.add(current);
+      if (!this.hasFactory(current)) {
+        await this.#loadFactory(current);
+      }
+      for (const dependency of this.staticImports.get(current)?.edges ?? []) {
+        pending.push(dependency);
+      }
+    }
+
+    // Keep evaluation asynchronous even when every factory is already resident.
+    await Promise.resolve();
+    const exports = this.initModule(id);
+    // Convert CJS before returning from async: resolving raw CJS exports first would
+    // assimilate a thenable before the compiler's namespace conversion could run.
+    return commonJsInterop === undefined
+      ? exports
+      : this.__toESM(exports, commonJsInterop);
+  }
+
+  /**
+   * @param {string} id
+   * @returns {Promise<void>}
+   */
+  #loadFactory(id) {
+    const pending = this.#pendingFactoryLoads.get(id);
+    if (pending) {
+      return pending;
+    }
+    const load = this.loadModuleFactories;
+    if (!load) {
+      return Promise.reject(new MissingFactoryError(id));
+    }
+    // Defer the host callback until after the request is indexed, including sync
+    // callbacks. Cleanup belongs to this one shared promise, not to its waiters.
+    const loading = Promise.resolve()
+      .then(() => load(id))
+      .then(() => {
+        if (!this.hasFactory(id) && !this.isExecuted(id)) {
+          throw new MissingFactoryError(id);
+        }
+      })
+      .finally(() => {
+        this.#pendingFactoryLoads.delete(id);
+      });
+    this.#pendingFactoryLoads.set(id, loading);
+    return loading;
   }
 
   /**

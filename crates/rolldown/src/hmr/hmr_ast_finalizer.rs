@@ -706,65 +706,35 @@ impl<'ast> HmrAstFinalizer<'_, 'ast> {
       return;
     }
 
-    // FIXME: consider about CommonJS interop
-    let is_importee_cjs = importee.exports_kind == rolldown_common::ExportsKind::CommonJs;
-
-    // __rolldown_runtime__.loadExports('./foo.js')
-    // Use stable module ID for consistent runtime lookup
-    let mut load_exports_call_expr = ast::Expression::new_call_expression(
-      SPAN,
-      Expression::new_identifier(SPAN, "__rolldown_runtime__.loadExports", self),
-      None,
-      [ast::Argument::new_string_literal(
+    // Source factories have no physical chunk imports to trigger loading. The runtime
+    // import primitive prepares the static factory closure asynchronously, then enters
+    // the same synchronous init gate used by static imports and require().
+    // See internal-docs/module-factory-rendering/implementation.md.
+    let mut args = oxc::allocator::Vec::from_value_in(
+      ast::Argument::new_string_literal(
         SPAN,
         Str::from_str_in(&importee.stable_id, self),
         None,
         self,
-      )],
-      false,
+      ),
       self,
     );
-
-    if is_importee_cjs {
-      let is_node_cjs = importee.def_format.is_commonjs();
-
-      let mut args =
-        oxc::allocator::Vec::from_value_in(ast::Argument::from(load_exports_call_expr), self);
-      if is_node_cjs {
-        args.push(ast::Argument::new_numeric_literal(
-          SPAN,
-          1.0,
-          None,
-          ast::NumberBase::Decimal,
-          self,
-        ));
-      }
-
-      // __rolldown_runtime__.__toDynamicImportESM(__rolldown_runtime__.loadExports('./foo.js'), node_mode)
-      load_exports_call_expr = ast::Expression::new_call_expression(
+    if importee.exports_kind.is_commonjs() {
+      // Convert CJS exports inside importModule, before its promise resolves.
+      args.push(ast::Argument::new_numeric_literal(
         SPAN,
-        Expression::new_identifier(SPAN, "__rolldown_runtime__.__toDynamicImportESM", self),
+        if importee.def_format.is_commonjs() { 1.0 } else { 0.0 },
         None,
-        args,
-        false,
+        ast::NumberBase::Decimal,
         self,
-      );
+      ));
     }
-
-    // `import()` is an execution point like static imports and `require`, so it goes through
-    // the same unconditional registry gate. Factories outlive the payload that shipped them:
-    // whether the importee rides this payload says nothing about whether it will be registered
-    // when these bytes run (a later patch may evict it), so the emitted code must not depend
-    // on payload membership. `initModule` short-circuits on a resident module and re-runs an
-    // evicted one from its factory.
-    // Turn `import('./foo.js')` into
-    // `(__rolldown_runtime__.initModule('./foo.js'), Promise.resolve().then(() => __rolldown_runtime__.loadExports('./foo.js')))`
-    let init_call = self.make_init_module_call(&self.modules[importee_idx]);
-    let promise_resolve_then_load_exports =
-      Expression::new_promise_resolve_then(load_exports_call_expr, self);
-    *it = ast::Expression::new_sequence_expression(
+    *it = ast::Expression::new_call_expression(
       SPAN,
-      [init_call, promise_resolve_then_load_exports],
+      Expression::new_member_access_expr("__rolldown_runtime__", "importModule", self),
+      None,
+      args,
+      false,
       self,
     );
   }

@@ -197,7 +197,12 @@ per-payload re-run flag written into the generated code — that puts
 runtime policy into codegen and cannot express "re-run this time, skip
 next time".
 
-A lazy `import()` goes through the same gate. The proxy stub removes
+A source-factory `import()` calls `importModule`, which can ask an optional host
+loader to install missing factories and their static closure before entering the
+same `initModule` gate. Dynamic edges remain lazy, and loading makes no HMR
+decisions. See [module factory rendering](../module-factory-rendering/design.md).
+
+A lazy `import()` through the existing compilation proxy also goes through the same gate. The proxy stub removes
 its own id from the cache before it fetches the lazy chunk, and the
 chunk's `initModule` tail then re-runs it (see
 [lazy-compilation/design.md](../lazy-compilation/design.md)).
@@ -406,7 +411,8 @@ the changed module.
   the HMR selection or delivery protocol
 - Runtime API (`runtime-extra-dev-common.js`): lifecycle methods
   `registerGraph`, `registerFactory`, `registerModule`, `initModule`,
-  `removeModuleCache`, `loadExports`; read-only queries
+  `importModule`, `removeModuleCache`, `loadExports`; optional host transport
+  `loadModuleFactories`; read-only queries
   `getImporters`, `isExecuted`, `hasFactory`; hooks
   `createModuleHotContext`, `onModuleCacheRemoval`
 - Key code: `crates/rolldown/src/hmr/module_graph_delta.rs`,
