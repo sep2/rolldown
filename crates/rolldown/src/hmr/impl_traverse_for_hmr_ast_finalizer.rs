@@ -1,6 +1,7 @@
 use oxc::{
   allocator::TakeIn,
   ast::ast::{self, Expression},
+  ast_visit::VisitJs,
   span::SPAN,
 };
 use oxc_traverse::Traverse;
@@ -12,6 +13,7 @@ use rolldown_ecmascript_utils::ExpressionFactoryExt as _;
 use rustc_hash::FxHashSet;
 
 use crate::hmr::{
+  export_binding_writes::{ExportBindingWrites, HoistedExportBindings},
   hmr_ast_finalizer::HmrAstFinalizer,
   utils::{HmrAstBuilder, MODULE_ID_PARAM_FOR_HMR},
 };
@@ -112,6 +114,32 @@ impl<'ast> Traverse<'ast, ()> for HmrAstFinalizer<'_, 'ast> {
     debug_assert!(load_exports_stmts.is_empty());
 
     let runtime_module_register = self.generate_runtime_module_register_for_hmr(ctx.scoping());
+    let mut hoisted = HoistedExportBindings {
+      exported: &self.exported_bindings,
+      symbols: FxHashSet::default(),
+      anonymous_default: false,
+    };
+    if !self.exported_bindings.is_empty() {
+      hoisted.visit_program(node);
+    }
+    let mut user_body = node.body.take_in(self);
+    if !self.exported_bindings.is_empty() {
+      for statement in user_body.take_in(self) {
+        let (symbols, anonymous_default) = self.declaration_export_bindings(&statement);
+        user_body.push(statement);
+        if !symbols.is_empty() || anonymous_default {
+          user_body.push(ast::Statement::new_expression_statement(
+            SPAN,
+            self.export_notification(
+              Expression::new_void_0(SPAN, self),
+              &symbols,
+              anonymous_default,
+            ),
+            self,
+          ));
+        }
+      }
+    }
 
     // Factories uniformly take only `__rolldown_module_id__`; for CommonJS the
     // module/exports objects become locals the body's rewritten `module`/`exports`
@@ -185,15 +213,26 @@ impl<'ast> Traverse<'ast, ()> for HmrAstFinalizer<'_, 'ast> {
     try_block.body.reserve_exact(
       cjs_module_locals.len()
         + runtime_module_register.len()
-        + node.body.len()
+        + user_body.len()
         + dependencies_init_fn_stmts.len()
         + 1, /* import.meta.hot*/
     );
     try_block.body.extend(cjs_module_locals);
     try_block.body.extend(runtime_module_register);
+    if !hoisted.symbols.is_empty() || hoisted.anonymous_default {
+      try_block.body.push(ast::Statement::new_expression_statement(
+        SPAN,
+        self.export_notification(
+          Expression::new_void_0(SPAN, self),
+          &hoisted.symbols,
+          hoisted.anonymous_default,
+        ),
+        self,
+      ));
+    }
     try_block.body.extend(dependencies_init_fn_stmts);
     try_block.body.push(self.create_module_hot_context_initializer_stmt());
-    try_block.body.extend(node.body.take_in(self));
+    try_block.body.extend(user_body);
 
     node
       .body
@@ -296,6 +335,108 @@ impl<'ast> Traverse<'ast, ()> for HmrAstFinalizer<'_, 'ast> {
     self.try_rewrite_dynamic_import(node);
     self.try_rewrite_require(node, ctx);
     self.rewrite_import_meta_hot(node);
+    if !self.exported_bindings.is_empty() {
+      let mut writes = ExportBindingWrites {
+        scoping: ctx.scoping(),
+        exported: &self.exported_bindings,
+        symbols: FxHashSet::default(),
+      };
+      match node {
+        Expression::AssignmentExpression(assignment) => {
+          writes.visit_assignment_target(&assignment.left);
+        }
+        Expression::UpdateExpression(update) => {
+          writes.visit_simple_assignment_target(&update.argument);
+        }
+        _ => {}
+      }
+      if !writes.symbols.is_empty() {
+        *node = self.export_notification(node.take_in(self), &writes.symbols, false);
+      }
+    }
+  }
+
+  fn exit_statement(
+    &mut self,
+    statement: &mut ast::Statement<'ast>,
+    _ctx: &mut oxc_traverse::TraverseCtx<'ast, ()>,
+  ) {
+    // A block does not change var scope. Lexical declarations are instead published
+    // after their original top-level statement, preserving their lexical scope.
+    if let ast::Statement::VariableDeclaration(declaration) = statement
+      && declaration.kind == ast::VariableDeclarationKind::Var
+      && !self.exported_bindings.is_empty()
+    {
+      let (symbols, anonymous_default) = self.declaration_export_bindings(statement);
+      if !symbols.is_empty() || anonymous_default {
+        *statement = ast::Statement::new_block_statement(
+          SPAN,
+          [
+            statement.take_in(self),
+            ast::Statement::new_expression_statement(
+              SPAN,
+              self.export_notification(
+                Expression::new_void_0(SPAN, self),
+                &symbols,
+                anonymous_default,
+              ),
+              self,
+            ),
+          ],
+          self,
+        );
+      }
+    }
+  }
+
+  fn exit_for_statement(
+    &mut self,
+    node: &mut ast::ForStatement<'ast>,
+    ctx: &mut oxc_traverse::TraverseCtx<'ast, ()>,
+  ) {
+    if !self.exported_bindings.is_empty()
+      && let Some(ast::ForStatementInit::VariableDeclaration(declaration)) = &node.init
+      && declaration.kind == ast::VariableDeclarationKind::Var
+    {
+      let mut writes = ExportBindingWrites {
+        scoping: ctx.scoping(),
+        exported: &self.exported_bindings,
+        symbols: FxHashSet::default(),
+      };
+      for declarator in &declaration.declarations {
+        writes.visit_binding_pattern(&declarator.id);
+      }
+      if !writes.symbols.is_empty() {
+        // Publish after the var initializer, before the first condition reads exports.
+        // A comma prefix also preserves an omitted condition as an always-true test.
+        let test =
+          node.test.take().unwrap_or_else(|| Expression::new_boolean_literal(SPAN, true, self));
+        node.test = Some(Expression::new_sequence_expression(
+          SPAN,
+          [
+            self.export_notification(Expression::new_void_0(SPAN, self), &writes.symbols, false),
+            test,
+          ],
+          self,
+        ));
+      }
+    }
+  }
+
+  fn exit_for_in_statement(
+    &mut self,
+    node: &mut ast::ForInStatement<'ast>,
+    ctx: &mut oxc_traverse::TraverseCtx<'ast, ()>,
+  ) {
+    self.notify_loop_export_writes(&node.left, &mut node.body, ctx);
+  }
+
+  fn exit_for_of_statement(
+    &mut self,
+    node: &mut ast::ForOfStatement<'ast>,
+    ctx: &mut oxc_traverse::TraverseCtx<'ast, ()>,
+  ) {
+    self.notify_loop_export_writes(&node.left, &mut node.body, ctx);
   }
 
   fn exit_identifier_reference(
@@ -308,6 +449,107 @@ impl<'ast> Traverse<'ast, ()> for HmrAstFinalizer<'_, 'ast> {
 }
 
 impl<'ast> HmrAstFinalizer<'_, 'ast> {
+  fn declaration_export_bindings(
+    &self,
+    statement: &ast::Statement<'ast>,
+  ) -> (FxHashSet<oxc::semantic::SymbolId>, bool) {
+    let identifiers = match statement {
+      ast::Statement::VariableDeclaration(declaration) => declaration
+        .declarations
+        .iter()
+        .flat_map(|declarator| declarator.id.get_binding_identifiers())
+        .collect::<Vec<_>>(),
+      ast::Statement::ClassDeclaration(class) => class.id.iter().collect::<Vec<_>>(),
+      _ => return (FxHashSet::default(), false),
+    };
+    let mut symbols = FxHashSet::default();
+    let mut anonymous_default = false;
+    for id in identifiers {
+      if let Some(symbol) = id.symbol_id.get() {
+        if self.exported_bindings.contains(&symbol) {
+          symbols.insert(symbol);
+        }
+      } else if id.name == "__rolldown_default__" && !self.exported_bindings.is_empty() {
+        anonymous_default = true;
+      }
+    }
+    (symbols, anonymous_default)
+  }
+
+  fn export_notification(
+    &self,
+    value: Expression<'ast>,
+    symbols: &FxHashSet<oxc::semantic::SymbolId>,
+    anonymous_default: bool,
+  ) -> Expression<'ast> {
+    let mut names = self
+      .module
+      .named_exports
+      .iter()
+      .filter_map(|(name, export)| {
+        (symbols.contains(&export.referenced.symbol) || (anonymous_default && name == "default"))
+          .then_some(name.as_str())
+      })
+      .collect::<Vec<_>>();
+    names.sort_unstable();
+    let names = ast::Argument::new_array_expression(
+      SPAN,
+      oxc::allocator::Vec::from_iter_in(
+        names.into_iter().map(|name| {
+          ast::ArrayExpressionElement::from(Expression::new_string_literal(
+            SPAN,
+            ast::Str::from_str_in(name, self),
+            None,
+            self,
+          ))
+        }),
+        self,
+      ),
+      self,
+    );
+    Expression::new_call_expression(
+      SPAN,
+      Expression::new_member_access_expr("__rolldown_runtime__", "notifyExports", self),
+      None,
+      [
+        ast::Argument::new_identifier(SPAN, MODULE_ID_PARAM_FOR_HMR, self),
+        ast::Argument::from(value),
+        names,
+      ],
+      false,
+      self,
+    )
+  }
+
+  fn notify_loop_export_writes(
+    &self,
+    left: &ast::ForStatementLeft<'ast>,
+    body: &mut ast::Statement<'ast>,
+    ctx: &oxc_traverse::TraverseCtx<'ast, ()>,
+  ) {
+    if self.exported_bindings.is_empty() {
+      return;
+    }
+    let mut writes = ExportBindingWrites {
+      scoping: ctx.scoping(),
+      exported: &self.exported_bindings,
+      symbols: FxHashSet::default(),
+    };
+    writes.visit_for_statement_left(left);
+    if !writes.symbols.is_empty() {
+      let notification = ast::Statement::new_expression_statement(
+        SPAN,
+        self.export_notification(Expression::new_void_0(SPAN, self), &writes.symbols, false),
+        self,
+      );
+      if let ast::Statement::BlockStatement(block) = body {
+        block.body.insert(0, notification);
+      } else {
+        *body = ast::Statement::new_block_statement(SPAN, [notification, body.take_in(self)], self);
+      }
+    }
+  }
+
   /// Rewrite a bare `exports` / `module` identifier to the wrapper-parameter
   /// name (`__rolldown_exports__` / `__rolldown_module__`), or an import-binding
   /// identifier to its generated binding name.

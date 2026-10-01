@@ -16,6 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub fn render_register_graph_source(
   module_table: &ModuleTable,
   carried_modules: impl IntoIterator<Item = ModuleIdx>,
+  initial: bool,
 ) -> Option<String> {
   let mut ids: Vec<ModuleIdx> = Vec::new();
   let mut id_to_index: FxHashMap<ModuleIdx, usize> = FxHashMap::default();
@@ -78,7 +79,11 @@ pub fn render_register_graph_source(
   }
 
   let mut source = String::with_capacity(ids.len() * 32);
-  source.push_str("__rolldown_runtime__.registerGraph({ids:[");
+  source.push_str(if initial {
+    "__rolldown_runtime__.registerInitialGraph({ids:["
+  } else {
+    "__rolldown_runtime__.registerGraph({ids:["
+  });
   for (i, idx) in ids.iter().enumerate() {
     if i > 0 {
       source.push(',');

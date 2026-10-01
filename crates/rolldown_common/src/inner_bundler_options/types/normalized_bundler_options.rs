@@ -219,6 +219,10 @@ impl NormalizedBundlerOptions {
     self.experimental.dev_mode.is_some()
   }
 
+  pub fn is_dev_module_factories_enabled(&self) -> bool {
+    self.experimental.dev_mode.as_ref().is_some_and(|dev| dev.module_factories == Some(true))
+  }
+
   pub fn is_strict_execution_order_enabled(&self) -> bool {
     self.strict_execution_order
   }

@@ -147,6 +147,11 @@ impl<'a> GenerateStage<'a> {
     &mut self,
     mut used_symbol_refs_builder: UsedSymbolRefsBuilder,
   ) -> BuildResult<BundleOutput> {
+    if self.options.is_dev_module_factories_enabled() {
+      crate::hmr::validate_dev_factory_modules::validate_dev_factory_modules(
+        &self.link_output.module_table.modules,
+      )?;
+    }
     self.plugin_driver.render_start(self.options).await?;
     let mut chunk_graph = self.generate_chunks(&mut used_symbol_refs_builder).await?;
 
@@ -171,6 +176,30 @@ impl<'a> GenerateStage<'a> {
       &order_state,
       &final_esm_init_metadata,
     );
+
+    if self.options.is_dev_module_factories_enabled() {
+      let runtime_chunk_idx = chunk_graph.module_to_chunk[self.link_output.runtime.id()]
+        .expect("dev runtime must be included");
+      // Match the normal import() callbacks emitted alongside the runtime. These are
+      // metadata/hash edges, not new static dependencies or a new chunk layout.
+      let loader_chunks = chunk_graph
+        .sorted_chunk_idx_vec
+        .iter()
+        .copied()
+        .filter(|idx| {
+          *idx != runtime_chunk_idx
+            && chunk_graph.chunk_table[*idx]
+              .modules
+              .iter()
+              .any(|module| *module != self.link_output.runtime.id())
+        })
+        .collect::<Vec<_>>();
+      let runtime_chunk = &mut chunk_graph.chunk_table[runtime_chunk_idx];
+      let mut dynamic_imports =
+        runtime_chunk.cross_chunk_dynamic_imports.iter().copied().collect::<FxIndexSet<_>>();
+      dynamic_imports.extend(loader_chunks);
+      runtime_chunk.cross_chunk_dynamic_imports = dynamic_imports.into_iter().collect();
+    }
 
     self.ensure_lazy_module_initialization_order(&mut chunk_graph);
 

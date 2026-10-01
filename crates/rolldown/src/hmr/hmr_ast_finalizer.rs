@@ -23,7 +23,7 @@ use rolldown_utils::{
   ecmascript::is_validate_identifier_name,
   indexmap::{FxIndexMap, FxIndexSet},
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::hmr::utils::{HmrAstBuilder, MODULE_EXPORTS_NAME_FOR_ESM};
 
@@ -63,6 +63,9 @@ pub struct HmrAstFinalizer<'me, 'ast> {
   // We need to store the static import statements for external separately, so we could put them outside of the `try` block.
   pub generated_static_import_stmts_from_external: FxIndexMap<ModuleIdx, ast::Statement<'ast>>,
   pub named_exports: FxHashMap<Str<'ast>, NamedExport>,
+  /// Replacement writes must keep the normal chunk facade live in factory-backed output.
+  pub exported_bindings: FxHashSet<SymbolId>,
+  pub use_chunk_loaders: bool,
 }
 
 impl<'ast> HmrAstFinalizer<'_, 'ast> {
@@ -759,6 +762,26 @@ impl<'ast> HmrAstFinalizer<'_, 'ast> {
     // evicted one from its factory.
     // Turn `import('./foo.js')` into
     // `(__rolldown_runtime__.initModule('./foo.js'), Promise.resolve().then(() => __rolldown_runtime__.loadExports('./foo.js')))`
+    if self.use_chunk_loaders {
+      *it = Expression::new_call_expression(
+        SPAN,
+        Expression::new_member_access_expr("__rolldown_runtime__", "importModule", self),
+        None,
+        [
+          ast::Argument::new_string_literal(
+            SPAN,
+            Str::from_str_in(importee.stable_id.as_str(), self),
+            None,
+            self,
+          ),
+          ast::Argument::new_boolean_literal(SPAN, is_importee_cjs, self),
+          ast::Argument::new_boolean_literal(SPAN, importee.def_format.is_commonjs(), self),
+        ],
+        false,
+        self,
+      );
+      return;
+    }
     let init_call = self.make_init_module_call(&self.modules[importee_idx]);
     let promise_resolve_then_load_exports =
       Expression::new_promise_resolve_then(load_exports_call_expr, self);

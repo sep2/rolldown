@@ -339,6 +339,12 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
       new_added_modules
     };
 
+    if self.options.is_dev_module_factories_enabled() {
+      super::validate_dev_factory_modules::validate_dev_factory_modules(
+        &self.module_table().modules,
+      )?;
+    }
+
     // Drop the changed modules whose post-rebuild render is byte-identical to the
     // pre-rebuild capture: their output didn't change, so stamping and shipping
     // them would only make every client re-run code it already holds. A module
@@ -447,6 +453,23 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
         }
       }
 
+      if self.options.is_dev_module_factories_enabled() {
+        // A changed factory can introduce a static edge into an unvisited chunk. Carry
+        // that synchronous dependency closure, stopping at copies this client already
+        // holds. Async targets use the normal chunk loaders instead.
+        let roots = carried.into_iter().collect::<Vec<_>>();
+        carried = FxIndexSet::default();
+        for root in roots {
+          self.collect_sync_dependencies_for_client(
+            root,
+            &mut carried,
+            client.shipped,
+            &FxHashMap::default(),
+            stamp_table,
+            false,
+          );
+        }
+      }
       let update = self.render_hmr_patch(carried, changed_ids.clone(), stamp_table).await?;
       client_updates.push(ClientHmrUpdate { client_id: client.client_id.to_string(), update });
     }
@@ -595,6 +618,12 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
     let options = Arc::clone(&self.options);
     self.cache.update_defer_sync_data(&options).await?;
 
+    if self.options.is_dev_module_factories_enabled() {
+      super::validate_dev_factory_modules::validate_dev_factory_modules(
+        &self.module_table().modules,
+      )?;
+    }
+
     // Collect all sync dependencies, stopping at modules whose current copy this client
     // already holds — factory resident per the ship map, or exports live per the
     // top-level-evaluated map. Overlapping concurrent lazy compiles both see an
@@ -607,6 +636,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
       shipped,
       evaluated,
       stamp_table,
+      true,
     );
 
     // Remove external modules - no way to "compile" them
@@ -645,6 +675,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
     if let Some(prelude) = crate::hmr::module_graph_delta::render_register_graph_source(
       self.module_table(),
       modules_to_be_updated.iter().copied(),
+      false,
     ) {
       source_joiner.append_source(prelude);
     }
@@ -775,6 +806,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
     if let Some(prelude) = crate::hmr::module_graph_delta::render_register_graph_source(
       self.module_table(),
       carried_modules.iter().copied(),
+      false,
     ) {
       source_joiner.append_source(prelude);
     }
@@ -900,6 +932,12 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
         generated_static_import_stmts_from_external: FxIndexMap::default(),
         unique_index,
         named_exports: FxHashMap::default(),
+        use_chunk_loaders: self.options.is_dev_module_factories_enabled(),
+        exported_bindings: if self.options.is_dev_module_factories_enabled() {
+          module.named_exports.values().map(|export| export.referenced.symbol).collect()
+        } else {
+          FxHashSet::default()
+        },
       };
 
       traverse_mut(&mut finalizer, fields.allocator, fields.program, scoping, ());
@@ -963,6 +1001,7 @@ impl<Fs: FileSystem + Clone + 'static> HmrStage<'_, Fs> {
     shipped: &FxHashMap<ArcStr, u32>,
     evaluated: &FxHashMap<ArcStr, u32>,
     stamp_table: &HmrStampTable,
+    include_entry_dynamic_imports: bool,
   ) {
     let modules = &self.module_table().modules;
     let mut stack = vec![proxy_entry_idx];
@@ -981,7 +1020,9 @@ impl<Fs: FileSystem + Clone + 'static> HmrStage<'_, Fs> {
         // The proxy's fetched template has `import($MODULE_ID)` pointing to the real module.
         // We need to include the real module and its sync dependencies in the patch.
         let should_follow = rec.kind.is_static()
-          || (module_idx == proxy_entry_idx && rec.kind == ImportKind::DynamicImport);
+          || (include_entry_dynamic_imports
+            && module_idx == proxy_entry_idx
+            && rec.kind == ImportKind::DynamicImport);
 
         if should_follow && let Some(dep_idx) = rec.resolved_module {
           // A module with N importers hits this edge check N times; the cheap

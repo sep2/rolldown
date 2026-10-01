@@ -9,6 +9,10 @@ class Module {
    * @type {string}
    */
   id;
+  /** Factory completion gates full binding refreshes: other getters may still be in TDZ.
+   * @type {boolean}
+   */
+  ready = false;
 
   /**
    * @param {string} id
@@ -86,11 +90,28 @@ export class DevRuntime {
    */
   moduleCache = new Map();
   /**
-   * Re-runnable factories from HMR patches and lazy chunks. The initial bundle stays
-   * scope-hoisted and contributes none.
+   * Re-runnable factories from HMR patches and lazy chunks. Opt-in factory-backed
+   * initial chunks contribute lower-priority fallbacks.
    * @type {Map<string, (id: string) => void>}
    */
   factories = new Map();
+  /**
+   * One compiler-owned binding callback per source module. It reconnects replacement
+   * namespaces to the ordinary chunk's live export variables; HMR eviction keeps it.
+   * @type {Map<string, (exports: any, names: ReadonlySet<string> | null) => void>}
+   */
+  #exportBindings = new Map();
+  /**
+   * Direct compiler-owned chunk loaders, indexed by source id. There is no graph walk:
+   * importing one physical chunk registers all its factories through normal evaluation.
+   * @type {Map<string, () => Promise<unknown>>}
+   */
+  #moduleLoaders = new Map();
+  /** Shared in-flight load per callback (one callback per physical chunk).
+   * Cleared on settlement so a rejected load can be retried.
+   * @type {Map<() => Promise<unknown>, Promise<unknown>>}
+   */
+  #loading = new Map();
   /**
    * Installed by the dev client at boot. The runtime is a store + executor and makes
    * no HMR decisions; accepting, disposing, and reloading live behind these hooks.
@@ -102,8 +123,25 @@ export class DevRuntime {
    * @param {ModuleGraphDelta} delta
    */
   registerGraph(delta) {
+    this.#registerGraph(delta, false);
+  }
+
+  /** Initial output must not roll back graph rows received in a newer patch.
+   * @param {ModuleGraphDelta} delta
+   */
+  registerInitialGraph(delta) {
+    this.#registerGraph(delta, true);
+  }
+
+  /** @param {ModuleGraphDelta} delta
+   * @param {boolean} initial
+   */
+  #registerGraph(delta, initial) {
     for (let i = 0; i < delta.localCount; i++) {
       const id = delta.ids[i];
+      if (initial && this.staticImports.has(id)) {
+        continue;
+      }
       const edges = delta.edges[i].map((j) => delta.ids[j]);
       for (const target of this.staticImports.get(id)?.edges ?? []) {
         this.importers.get(target)?.delete(id);
@@ -142,6 +180,112 @@ export class DevRuntime {
    */
   registerFactory(id, fn) {
     this.factories.set(id, fn);
+  }
+
+  /**
+   * Lower-priority registration for normal output that may be loaded after an update.
+   * @param {string} id
+   * @param {(id: string) => void} factory
+   */
+  registerInitialFactory(id, factory) {
+    if (!this.factories.has(id)) {
+      this.factories.set(id, factory);
+    }
+  }
+
+  /**
+   * Compiler lowering of an ordinary ESM initializer. The returned function uses the
+   * same cache/factory gate as a patch, rather than retaining a second one-shot cache.
+   * See internal-docs/dev-module-factories/design.md.
+   * @param {string} id
+   * @param {((exports: any, names: ReadonlySet<string> | null) => void) | null} bindings
+   * @param {() => void} factory
+   * @returns {() => any}
+   * @internal
+   */
+  createModuleInitializer(id, bindings, factory) {
+    this.registerInitialFactory(id, factory);
+    if (bindings) {
+      this.#exportBindings.set(id, bindings);
+      const module = this.moduleCache.get(id);
+      if (module?.ready) {
+        bindings(module.exports, null);
+      }
+    }
+    return () => this.initModule(id);
+  }
+
+  /**
+   * CommonJS keeps its usual fresh module/exports pair on each factory execution.
+   * @param {string} id
+   * @param {(exports: any, module: { exports: any }) => void} factory
+   * @returns {() => any}
+   * @internal
+   */
+  createCommonJsInitializer(id, factory) {
+    return this.createModuleInitializer(id, null, () => {
+      const module = { exports: {} };
+      factory(module.exports, module);
+    });
+  }
+
+  /**
+   * Generated around writes to exported bindings in replacement factories. Preserve
+   * the expression's value (including postfix updates). Publish only initialized names.
+   * @template T
+   * @param {string} id
+   * @param {T} value
+   * @param {string[]} names Only bindings whose initialization/write just succeeded.
+   * @returns {T}
+   * @internal
+   */
+  notifyExports(id, value, names) {
+    const module = this.moduleCache.get(id);
+    if (module) {
+      this.#exportBindings.get(id)?.(module.exports, new Set(names));
+    }
+    return value;
+  }
+
+  /**
+   * @param {string[]} ids
+   * @param {() => Promise<unknown>} loader
+   * @internal
+   */
+  registerChunkLoader(ids, loader) {
+    for (const id of ids) {
+      if (!this.#moduleLoaders.has(id)) {
+        this.#moduleLoaders.set(id, loader);
+      }
+    }
+  }
+
+  /**
+   * An updated factory's dynamic import still uses the normal output's physical loader
+   * when the target is cold. Fresh factories already delivered by HMR need no transport.
+   * @param {string} id
+   * @param {boolean} commonjs
+   * @param {boolean} nodeMode
+   * @returns {Promise<any>}
+   * @internal
+   */
+  async importModule(id, commonjs, nodeMode) {
+    if (!this.isExecuted(id) && !this.hasFactory(id)) {
+      const loader = this.#moduleLoaders.get(id);
+      if (!loader) {
+        throw new MissingFactoryError(id);
+      }
+      let loading = this.#loading.get(loader);
+      if (!loading) {
+        loading = Promise.resolve()
+          .then(loader)
+          .finally(() => this.#loading.delete(loader));
+        this.#loading.set(loader, loading);
+      }
+      await loading;
+    }
+    const exports = this.initModule(id);
+    return commonjs ? this.__toESM(exports, nodeMode) : exports;
   }
 
   /**
@@ -207,6 +351,11 @@ export class DevRuntime {
       throw new MissingFactoryError(id);
     }
     factory(id);
+    const module = this.moduleCache.get(id);
+    if (module) {
+      module.ready = true;
+      this.#exportBindings.get(id)?.(module.exports, null);
+    }
     return this.loadExports(id);
   }
 

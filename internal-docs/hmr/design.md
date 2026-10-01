@@ -7,6 +7,10 @@
 
 ## Summary
 
+This document describes the default scope-hoisted initial output. The opt-in
+[factory-backed dev output prototype](../dev-module-factories/design.md) changes
+initial evaluation and export bridging, not client-side HMR policy.
+
 In Full Bundle Mode (FBM, `bundledDev` in Vite code), HMR decisions
 happen in the browser. On a file change the server rebuilds, renders a
 per-client patch, and pushes one message: `changedIds` (the modules

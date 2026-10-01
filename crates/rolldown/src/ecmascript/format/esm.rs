@@ -179,6 +179,7 @@ fn render_chunk_content<'code>(
     crate::hmr::module_graph_delta::render_register_graph_source(
       &ctx.link_output.module_table,
       ctx.chunk.modules.iter().copied(),
+      ctx.options.is_dev_module_factories_enabled(),
     )
   } else {
     None
@@ -189,7 +190,12 @@ fn render_chunk_content<'code>(
   let is_runtime_module =
     |idx: ModuleIdx| ctx.link_output.module_table[idx].id().as_str() == RUNTIME_MODULE_KEY;
   let chunk_carries_runtime =
-    dev_graph_prelude.is_some() && ctx.chunk.modules.iter().copied().any(is_runtime_module);
+    ctx.options.is_dev_mode_enabled() && ctx.chunk.modules.iter().copied().any(is_runtime_module);
+  if ctx.options.is_dev_module_factories_enabled() && chunk_carries_runtime {
+    dev_graph_prelude
+      .get_or_insert_default()
+      .push_str(&super::dev_module_loaders::render_dev_module_loaders(ctx));
+  }
   if !chunk_carries_runtime {
     if let Some(prelude) = dev_graph_prelude.take() {
       source_joiner.append_source(prelude);

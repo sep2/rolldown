@@ -260,15 +260,10 @@ impl<'ast> VisitJsMut<'ast> for ScopeHoistingFinalizer<'_, 'ast> {
         let mut stmts_inside_closure = allocator::Vec::new_in(self);
         stmts_inside_closure.append(&mut program.body);
 
-        program.body.push(Statement::new_commonjs_wrapper_stmt(
+        program.body.push(self.create_commonjs_initializer_stmt(
           wrap_ref_name,
           commonjs_ref_expr,
           stmts_inside_closure,
-          self.ctx.module.ast_usage,
-          self.ctx.options.profiler_names,
-          &self.ctx.module.stable_id,
-          self.ctx.linking_info.is_tla_or_contains_tla_dependency,
-          self,
         ));
       }
       ModuleWrapperMode::InteropEsm(target) | ModuleWrapperMode::ExecutionOrder(target) => {
@@ -379,34 +374,42 @@ impl<'ast> VisitJsMut<'ast> for ScopeHoistingFinalizer<'_, 'ast> {
           return;
         }
 
-        program.body.push(Statement::new_esm_wrapper_stmt(
-          EsmWrapperStmtOptions {
-            binding_name: wrap_ref_name,
-            esm_fn_expr: esm_ref_expr,
-            statements: stmts_inside_closure,
-            profiler_name: self
-              .ctx
-              .options
-              .profiler_names
-              .then_some(self.ctx.module.stable_id.as_str()),
-            call_kind: if self.ctx.options.optimization.is_pife_for_module_wrappers_enabled() {
-              EsmWrapperCallKind::Pife
-            } else {
-              EsmWrapperCallKind::Plain
+        if self.ctx.options.is_dev_module_factories_enabled() {
+          program.body.push(self.create_dev_initializer_stmt(
+            wrap_ref_name,
+            stmts_inside_closure,
+            false,
+          ));
+        } else {
+          program.body.push(Statement::new_esm_wrapper_stmt(
+            EsmWrapperStmtOptions {
+              binding_name: wrap_ref_name,
+              esm_fn_expr: esm_ref_expr,
+              statements: stmts_inside_closure,
+              profiler_name: self
+                .ctx
+                .options
+                .profiler_names
+                .then_some(self.ctx.module.stable_id.as_str()),
+              call_kind: if self.ctx.options.optimization.is_pife_for_module_wrappers_enabled() {
+                EsmWrapperCallKind::Pife
+              } else {
+                EsmWrapperCallKind::Plain
+              },
+              body_kind: if self.ctx.linking_info.is_tla_or_contains_tla_dependency {
+                EsmWrapperBodyKind::Async
+              } else {
+                EsmWrapperBodyKind::Sync
+              },
+              decl_kind: if matches!(wrapper_mode, ModuleWrapperMode::ExecutionOrder(_)) {
+                EsmWrapperDeclKind::HoistedFunction
+              } else {
+                EsmWrapperDeclKind::Var
+              },
             },
-            body_kind: if self.ctx.linking_info.is_tla_or_contains_tla_dependency {
-              EsmWrapperBodyKind::Async
-            } else {
-              EsmWrapperBodyKind::Sync
-            },
-            decl_kind: if matches!(wrapper_mode, ModuleWrapperMode::ExecutionOrder(_)) {
-              EsmWrapperDeclKind::HoistedFunction
-            } else {
-              EsmWrapperDeclKind::Var
-            },
-          },
-          self,
-        ));
+            self,
+          ));
+        }
       }
       ModuleWrapperMode::None => {
         program.body.splice(0..0, declaration_of_module_namespace_object);

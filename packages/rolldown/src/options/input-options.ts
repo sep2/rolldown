@@ -224,6 +224,14 @@ export type DevModeOptions =
        */
       skipCommonRuntimeInjection?: boolean;
       lazy?: boolean;
+      /**
+       * Use registry-backed module initializers in the normal ESM development output.
+       * Entry execution, exports, chunk grouping, and output naming remain compiler-owned.
+       * A late initial chunk cannot replace a factory already delivered by HMR.
+       * Review prototype: synchronous JS modules only (no raw JSON/text/data exports).
+       * @default false
+       */
+      moduleFactories?: boolean;
     };
 
 export type OptimizationOptions = {

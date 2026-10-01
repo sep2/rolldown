@@ -382,6 +382,23 @@ pub fn prepare_build_context(
     }
   };
 
+  let module_factories =
+    experimental.dev_mode.as_ref().is_some_and(|dev| dev.module_factories == Some(true));
+  if module_factories && !matches!(format, OutputFormat::Esm) {
+    return Err(
+      BuildDiagnostic::bundler_initialize_error(
+        "experimental.devMode.moduleFactories currently requires ESM output.".to_string(),
+        None,
+      )
+      .into(),
+    );
+  }
+  // Replacement namespaces must feed live variables, not literals captured during linking.
+  let mut optimization = normalize_optimization_option(raw_options.optimization, platform);
+  if module_factories {
+    optimization.inline_const = None;
+  }
+
   let mut normalized = NormalizedBundlerOptions {
     input: raw_options.input.unwrap_or_default(),
     external: raw_options.external.unwrap_or_default(),
@@ -471,7 +488,7 @@ pub fn prepare_build_context(
     normalized_cwd,
     preserve_entry_signatures,
     devtools: raw_options.devtools.is_some(),
-    optimization: normalize_optimization_option(raw_options.optimization, platform),
+    optimization,
     top_level_var: raw_options.top_level_var.unwrap_or(false),
     minify_internal_exports: raw_options
       .minify_internal_exports

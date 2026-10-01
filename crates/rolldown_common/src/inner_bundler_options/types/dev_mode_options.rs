@@ -22,4 +22,6 @@ pub struct DevModeOptions {
   pub skip_common_runtime_injection: Option<bool>,
   /// Enable lazy compilation for dynamic imports.
   pub lazy: Option<bool>,
+  /// Use registry-backed initializers for modules in the normal development output.
+  pub module_factories: Option<bool>,
 }

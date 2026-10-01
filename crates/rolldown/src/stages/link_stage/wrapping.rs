@@ -102,6 +102,20 @@ impl LinkStage<'_> {
         );
       }
 
+      // Registry-backed initial output uses the existing per-module wrappers, so the
+      // ordinary linker still owns symbols, chunk dependencies, and entry facades.
+      // See internal-docs/dev-module-factories/implementation.md.
+      if self.options.is_dev_module_factories_enabled()
+        && module_id != self.runtime.id()
+        && self.metas[module_id].wrap_kind().is_none()
+      {
+        self.metas[module_id].set_wrap_kind(if module.exports_kind.is_commonjs() {
+          WrapKind::Cjs
+        } else {
+          WrapKind::Esm
+        });
+      }
+
       let need_to_wrap = !self.metas[module_id].wrap_kind().is_none();
 
       if need_to_wrap {

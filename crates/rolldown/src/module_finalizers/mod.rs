@@ -47,6 +47,7 @@ use crate::stages::generate_stage::order_wrap_state::OrderCjsCarrierKey;
 use crate::utils;
 use crate::utils::external_import_interop::import_record_needs_interop;
 
+mod dev_module_factories;
 mod hmr;
 mod rename;
 
